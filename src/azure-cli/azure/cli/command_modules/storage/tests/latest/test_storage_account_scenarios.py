@@ -8,7 +8,7 @@ import unittest
 
 from azure.cli.testsdk import (ScenarioTest, LocalContextScenarioTest, JMESPathCheck, ResourceGroupPreparer,
                                StorageAccountPreparer, live_only, LiveScenarioTest,
-                               record_only, KeyVaultPreparer, JMESPathCheckExists)
+                               record_only, KeyVaultPreparer, JMESPathCheckExists, JMESPathCheckNotExists)
 from azure.cli.testsdk.decorators import serial_test
 from azure.cli.core.profiles import ResourceType
 from ..storage_test_util import StorageScenarioMixin
@@ -147,6 +147,68 @@ class StorageAccountTests(StorageScenarioMixin, ScenarioTest):
         self.cmd('storage account network-rule list -g {rg} --account-name {sa}', checks=[
             JMESPathCheck('length(resourceAccessRules)', 1)
         ])
+
+    @ResourceGroupPreparer(name_prefix='cli_test_storage_account_ipv6', location='eastus2euap')
+    def test_storage_account_ipv6(self, resource_group):
+        self.kwargs = {
+            'rg': resource_group,
+            'sa': self.create_random_name('sa', 24),
+            'ip1': '25.1.2.3',
+            'ip2': '25.2.0.0/24',
+            'ipv6_1': 'fe00:0:0:1::92',
+            'ipv6_2': 'fe00::1:0:0:1:92',
+            'ipv6_3': 'fe00:0:0:1::/111',
+        }
+        # test storage account create/update with ipv6 settings
+        self.cmd('storage account create -g {rg} -n {sa} --publish-ipv6-endpoint true',
+                 checks=[
+                     JMESPathCheck('dualStackEndpointPreference.publishIpv6Endpoint', True),
+                     JMESPathCheckExists('primaryEndpoints.blob'),
+                     JMESPathCheckExists('primaryEndpoints.ipv6Endpoints')
+                 ])
+
+        self.cmd('storage account update -g {rg} -n {sa} --publish-ipv6-endpoint false',
+                 checks=[
+                     JMESPathCheck('dualStackEndpointPreference.publishIpv6Endpoint', False),
+                     JMESPathCheckExists('primaryEndpoints.blob'),
+                     JMESPathCheckNotExists('primaryEndpoints.ipv6Endpoints')
+        ])
+
+        # test add ipv4 addresses as ipv6 and ipv6 address as ipv4, should fail
+        from azure.cli.core.azclierror import InvalidArgumentValueError
+        with self.assertRaises(InvalidArgumentValueError):
+            self.cmd('storage account network-rule add -g {rg} --account-name {sa} --ip-address {ipv6_1} {ip2} '
+                     '--ipv6-address {ip1} {ipv6_2}')
+
+        with self.assertRaises(InvalidArgumentValueError):
+            self.cmd('storage account network-rule add -g {rg} --account-name {sa} --ip-address {ipv6_1} {ipv6_2} '
+                     '--ipv6-address {ip1} {ip2}')
+
+        # test add both ipv4 and ipv6 addresses
+        self.cmd('storage account network-rule add -g {rg} --account-name {sa} --ip-address {ip1} {ip2} '
+                 '--ipv6-address {ipv6_1} {ipv6_2}')
+        self.cmd('storage account network-rule list -g {rg} --account-name {sa}', checks=[
+            JMESPathCheck('length(ipRules)', 2),
+            JMESPathCheck('length(ipv6Rules)', 2)
+        ])
+
+        # test add multiple ip addresses with overlaps between them
+        with self.assertRaises(InvalidArgumentValueError):
+            self.cmd('storage account network-rule add -g {rg} --account-name {sa} --ipv6-address {ipv6_1} {ipv6_3}')
+        # test add multiple ip addresses with some overlaps with the server
+        self.cmd('storage account network-rule add -g {rg} --account-name {sa} --ipv6-address {ipv6_3}')
+        self.cmd('storage account network-rule list -g {rg} --account-name {sa}', checks=[
+            JMESPathCheck('length(ipRules)', 2),
+            JMESPathCheck('length(ipv6Rules)', 2)
+        ])
+
+        # test remove multiple ip addresses
+        self.cmd('storage account network-rule remove -g {rg} --account-name {sa} --ipv6-address {ipv6_1}')
+        self.cmd('storage account network-rule list -g {rg} --account-name {sa}', checks=[
+            JMESPathCheck('length(ipRules)', 2),
+            JMESPathCheck('length(ipv6Rules)', 1)
+        ])
+
 
     @serial_test()
     @ResourceGroupPreparer(location='southcentralus')
