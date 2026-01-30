@@ -127,7 +127,7 @@ def create_webapp(cmd, resource_group_name, name, plan, runtime=None, startup_fi
                   role='Contributor', scope=None, vnet=None, subnet=None, https_only=False,
                   public_network_access=None, acr_use_identity=False, acr_identity=None, basic_auth="",
                   auto_generated_domain_name_label_scope=None):
-    from azure.mgmt.web.models import Site
+    from azure.mgmt.web.models import Site, OutboundVnetRouting
     from azure.core.exceptions import ResourceNotFoundError as _ResourceNotFoundError
     SiteConfig, SkuDescription, NameValuePair = cmd.get_models(
         'SiteConfig', 'SkuDescription', 'NameValuePair')
@@ -227,10 +227,10 @@ def create_webapp(cmd, resource_group_name, name, plan, runtime=None, startup_fi
                                vnet_name=subnet_info["vnet_name"],
                                subnet_name=subnet_info["subnet_name"])
         subnet_resource_id = subnet_info["subnet_resource_id"]
-        vnet_route_all_enabled = True
+        outbound_vnet_routing = OutboundVnetRouting(application_traffic=True)
     else:
         subnet_resource_id = None
-        vnet_route_all_enabled = None
+        outbound_vnet_routing = None
 
     if using_webapp_up:
         https_only = using_webapp_up
@@ -240,7 +240,7 @@ def create_webapp(cmd, resource_group_name, name, plan, runtime=None, startup_fi
 
     webapp_def = Site(location=location, site_config=site_config, server_farm_id=plan_info.id, tags=tags,
                       https_only=https_only, virtual_network_subnet_id=subnet_resource_id,
-                      public_network_access=public_network_access, vnet_route_all_enabled=vnet_route_all_enabled,
+                      public_network_access=public_network_access, outbound_vnet_routing=outbound_vnet_routing,
                       auto_generated_domain_name_label_scope=auto_generated_domain_name_label_scope)
     if runtime:
         runtime = _StackRuntimeHelper.remove_delimiters(runtime)
@@ -3161,7 +3161,7 @@ def update_site_configs(cmd, resource_group_name, name, slot=None, number_of_wor
     import inspect
     frame = inspect.currentframe()
     bool_flags = ['remote_debugging_enabled', 'web_sockets_enabled', 'always_on',
-                  'auto_heal_enabled', 'use32_bit_worker_process', 'http20_enabled', 'vnet_route_all_enabled']
+                  'auto_heal_enabled', 'use32_bit_worker_process', 'http20_enabled']
     int_flags = ['pre_warmed_instance_count', 'number_of_workers']
     # note: getargvalues is used already in azure.cli.core.commands.
     # and no simple functional replacement for this deprecating method for 3.5
@@ -3234,7 +3234,21 @@ def update_site_configs(cmd, resource_group_name, name, slot=None, number_of_wor
         if max_replicas is not None:
             setattr(configs, 'function_app_scale_limit', max_replicas)
         return update_configuration_polling(cmd, resource_group_name, name, slot, configs)
-    return _generic_site_operation(cmd.cli_ctx, resource_group_name, name, 'update_configuration', slot, configs)
+
+    # Update SiteConfig first
+    result = _generic_site_operation(cmd.cli_ctx, resource_group_name, name, 'update_configuration', slot, configs)
+
+    # Handle vnet_route_all_enabled separately using Site-level outbound_vnet_routing property
+    # This is done after SiteConfig update to ensure the Site-level property is not overwritten
+    if vnet_route_all_enabled is not None:
+        from azure.mgmt.web.models import OutboundVnetRouting
+        client = web_client_factory(cmd.cli_ctx)
+        app = _generic_site_operation(cmd.cli_ctx, resource_group_name, name, 'get', slot, client=client)
+        app.outbound_vnet_routing = OutboundVnetRouting(application_traffic=vnet_route_all_enabled == 'true')
+        _generic_site_operation(cmd.cli_ctx, resource_group_name, name, 'begin_create_or_update', slot,
+                                client=client, extra_parameter=app)
+
+    return result
 
 
 def update_configuration_polling(cmd, resource_group_name, name, slot, configs):
@@ -7238,9 +7252,11 @@ def create_functionapp(cmd, resource_group_name, name, storage_account, plan=Non
                                subnet_name=subnet_info["subnet_name"],
                                subnet_service_delegation=FLEX_SUBNET_DELEGATION if flexconsumption_location else None)
         subnet_resource_id = subnet_info["subnet_resource_id"]
-        site_config.vnet_route_all_enabled = True
+        from azure.mgmt.web.models import OutboundVnetRouting
+        outbound_vnet_routing = OutboundVnetRouting(application_traffic=True)
     else:
         subnet_resource_id = None
+        outbound_vnet_routing = None
 
     # if this is a managed function app (Azure Functions on Azure Containers), http20_proxy_flag must be None
     if environment is not None:
@@ -7248,7 +7264,8 @@ def create_functionapp(cmd, resource_group_name, name, storage_account, plan=Non
 
     functionapp_def = Site(location=None, site_config=site_config, tags=tags,
                            virtual_network_subnet_id=subnet_resource_id, https_only=https_only,
-                           auto_generated_domain_name_label_scope=auto_generated_domain_name_label_scope)
+                           auto_generated_domain_name_label_scope=auto_generated_domain_name_label_scope,
+                           outbound_vnet_routing=outbound_vnet_routing)
 
     plan_info = None
     if runtime is not None:
@@ -8822,7 +8839,8 @@ def _add_vnet_integration(cmd, name, resource_group_name, vnet, subnet, slot=Non
                                subnet_service_delegation=FLEX_SUBNET_DELEGATION if is_flex else None)
 
     app.virtual_network_subnet_id = subnet_info["subnet_resource_id"]
-    app.site_config.vnet_route_all_enabled = True
+    from azure.mgmt.web.models import OutboundVnetRouting
+    app.outbound_vnet_routing = OutboundVnetRouting(application_traffic=True)
 
     _generic_site_operation(cmd.cli_ctx, resource_group_name, name, 'begin_create_or_update', slot,
                             client=client, extra_parameter=app)
