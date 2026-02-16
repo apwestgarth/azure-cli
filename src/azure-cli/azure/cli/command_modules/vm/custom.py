@@ -2910,13 +2910,14 @@ def show_vm_nic(cmd, resource_group_name, vm_name, nic):
 
     NicShow = import_aaz_by_profile(cmd.cli_ctx.cloud.profile, "network.nic").Show
 
-    vm = get_vm(cmd, resource_group_name, vm_name)
+    vm = get_vm_by_aaz(cmd, resource_group_name, vm_name)
+
     found = next(
-        (n for n in vm.network_profile.network_interfaces if nic.lower() == n.id.lower()), None
+        (n for n in vm.get("networkProfile", {}).get("networkInterfaces", []) if nic.lower() == n["id"].lower()), None
         # pylint: disable=no-member
     )
     if found:
-        nic_name = parse_resource_id(found.id)['name']
+        nic_name = parse_resource_id(found["id"])['name']
         return NicShow(cli_ctx=cmd.cli_ctx)(command_args={
             'name': nic_name,
             'resource_group': resource_group_name
@@ -2925,12 +2926,12 @@ def show_vm_nic(cmd, resource_group_name, vm_name, nic):
 
 
 def list_vm_nics(cmd, resource_group_name, vm_name):
-    vm = get_vm(cmd, resource_group_name, vm_name)
-    return vm.network_profile.network_interfaces  # pylint: disable=no-member
+    vm = get_vm_by_aaz(cmd, resource_group_name, vm_name)
+    return vm.get("networkProfile", {}).get("networkInterfaces", [])  # pylint: disable=no-member
 
 
 def add_vm_nic(cmd, resource_group_name, vm_name, nics, primary_nic=None):
-    vm = get_vm_to_update(cmd, resource_group_name, vm_name)
+    vm = get_vm_to_update_by_aaz(cmd, resource_group_name, vm_name)
     new_nics = _build_nic_list(cmd, nics)
     existing_nics = _get_existing_nics(vm)
     return _update_vm_nics(cmd, vm, existing_nics + new_nics, primary_nic)
@@ -2939,25 +2940,25 @@ def add_vm_nic(cmd, resource_group_name, vm_name, nics, primary_nic=None):
 def remove_vm_nic(cmd, resource_group_name, vm_name, nics, primary_nic=None):
 
     def to_delete(nic_id):
-        return [n for n in nics_to_delete if n.id.lower() == nic_id.lower()]
+        return [n for n in nics_to_delete if n["id"].lower() == nic_id.lower()]
 
-    vm = get_vm_to_update(cmd, resource_group_name, vm_name)
+    vm = get_vm_to_update_by_aaz(cmd, resource_group_name, vm_name)
     nics_to_delete = _build_nic_list(cmd, nics)
     existing_nics = _get_existing_nics(vm)
-    survived = [x for x in existing_nics if not to_delete(x.id)]
+
+    survived = [x for x in existing_nics if not to_delete(x["id"])]
+
     return _update_vm_nics(cmd, vm, survived, primary_nic)
 
 
 def set_vm_nic(cmd, resource_group_name, vm_name, nics, primary_nic=None):
-    vm = get_vm_to_update(cmd, resource_group_name, vm_name)
+    vm = get_vm_to_update_by_aaz(cmd, resource_group_name, vm_name)
     nics = _build_nic_list(cmd, nics)
     return _update_vm_nics(cmd, vm, nics, primary_nic)
 
 
 def _build_nic_list(cmd, nic_ids):
     NicShow = import_aaz_by_profile(cmd.cli_ctx.cloud.profile, "network.nic").Show
-
-    NetworkInterfaceReference = cmd.get_models('NetworkInterfaceReference')
     nic_list = []
     if nic_ids:
         # pylint: disable=no-member
@@ -2967,20 +2968,20 @@ def _build_nic_list(cmd, nic_ids):
                 'name': name,
                 'resource_group': rg
             })
-            nic_list.append(NetworkInterfaceReference(id=nic['id'], primary=False))
+            nic_list.append({"id": nic["id"], "primary": False})
     return nic_list
 
 
 def _get_existing_nics(vm):
-    network_profile = getattr(vm, 'network_profile', None)
+    network_profile = vm.get("networkProfile", None)
     nics = []
     if network_profile is not None:
-        nics = network_profile.network_interfaces or []
+        nics = network_profile.get("networkInterfaces", [])
     return nics
 
 
 def _update_vm_nics(cmd, vm, nics, primary_nic):
-    NetworkProfile = cmd.get_models('NetworkProfile')
+    from .operations.vm import convert_show_result_to_snake_case
 
     if primary_nic:
         try:
@@ -2988,25 +2989,24 @@ def _update_vm_nics(cmd, vm, nics, primary_nic):
         except IndexError:
             primary_nic_name = primary_nic
 
-        matched = [n for n in nics if _parse_rg_name(n.id)[1].lower() == primary_nic_name.lower()]
+        matched = [n for n in nics if _parse_rg_name(n["id"])[1].lower() == primary_nic_name.lower()]
         if not matched:
             raise CLIError('Primary Nic {} is not found'.format(primary_nic))
         if len(matched) > 1:
             raise CLIError('Duplicate Nic entries with name {}'.format(primary_nic))
         for n in nics:
-            n.primary = False
-        matched[0].primary = True
+            n["primary"] = False
+        matched[0]["primary"] = True
     elif nics:
-        if not [n for n in nics if n.primary]:
-            nics[0].primary = True
+        if not [n for n in nics if n["primary"]]:
+            nics[0]["primary"] = True
 
-    network_profile = getattr(vm, 'network_profile', None)
-    if network_profile is None:
-        vm.network_profile = NetworkProfile(network_interfaces=nics)
-    else:
-        network_profile.network_interfaces = nics
-
-    return set_vm(cmd, vm).network_profile.network_interfaces
+    if "networkProfile" not in vm:
+        vm["networkProfile"] = {}
+    vm["networkProfile"]["networkInterfaces"] = nics
+    vm = convert_show_result_to_snake_case(vm)
+    result = set_vm_by_aaz(cmd, vm)
+    return (result.get("networkProfile") or {}).get("networkInterfaces") or []
 # endregion
 
 
